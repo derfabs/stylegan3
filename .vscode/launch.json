@@ -19,7 +19,7 @@
             "program": "stream.py",
             "args": [
                 "--network=models/stylegan3-t-ffhq-1024x1024.pkl",
-                "--window_dimensions=1024,1024",
+                "--window_dimensions=2560,1440",
                 "--speed=0.1"
             ],
             "console": "integratedTerminal"

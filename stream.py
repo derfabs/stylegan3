@@ -18,13 +18,7 @@ def parse_dimensions(input: str) -> Tuple[str]:
     return tuple(int(dim.strip()) for dim in input.split(','))
 
 
-def generate_frames(
-        network: str,
-        window_dimensions: Tuple[int, int],
-        speed: float,
-        seed: float,
-        pipe: Connection
-    ):
+def generate_frames(network: str, speed: float, seed: float, pipe: Connection):
     # check for cuda
     cuda_avail = torch.cuda.is_available()
     if cuda_avail:
@@ -75,10 +69,8 @@ def generate_frames(
                + 128).clamp(0, 255).to(torch.uint8)
 
         pil_image = image.fromarray(img[0].cpu().numpy(), 'RGB')
-        if pil_image.size != window_dimensions:
-            pil_image = pil_image.resize(window_dimensions)
 
-        pipe.send_bytes(pil_image.tobytes())
+        pipe.send(pil_image)
 
 
 def pilImageToSurface(pil_image: Image) -> pygame.Surface:
@@ -111,12 +103,12 @@ def stream(
     # setup pipe
     parent_conn, child_conn = mp.Pipe()
 
+    image_dimensions = (min(window_dimensions), min(window_dimensions))
     # start process
     process = mp.Process(
         target=generate_frames,
         kwargs=({
             'network': network,
-            'window_dimensions': window_dimensions,
             'speed': speed,
             'seed': seed,
             'pipe': child_conn
@@ -135,15 +127,22 @@ def stream(
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     raise SystemExit
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_f:
+                        pygame.display.toggle_fullscreen()
 
             # get new surface if avaliable
             if parent_conn.poll():
-                current_surface = pygame.image.fromstring(
-                    parent_conn.recv_bytes(), window_dimensions, 'RGB'
-                    ).convert()
+                pil_image: Image = parent_conn.recv()
+
+                if pil_image.size != image_dimensions:
+                    pil_image = pil_image.resize(image_dimensions)
+
+                current_surface = pilImageToSurface(pil_image)
 
             # draw current surface if avaliable
             if current_surface:
+                window.fill(0)
                 window.blit(
                     current_surface,
                     current_surface.get_rect(
