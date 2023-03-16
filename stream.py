@@ -1,40 +1,167 @@
+from typing import Tuple
+
+import math
+import click
+import multiprocessing as mp
+from multiprocessing.connection import Connection
 import pygame
-import glob
 import time
-from PIL import Image
+import torch
+import numpy as np
+import dnnlib
+import legacy
+from PIL import Image as image
+from PIL.Image import Image
 
 
-def pilImageToSurface(pil_image):
+def parse_dimensions(input: str) -> Tuple[str]:
+    return tuple(int(dim.strip()) for dim in input.split(','))
+
+
+def generate_frames(
+        network: str,
+        window_dimensions: Tuple[int, int],
+        speed: float,
+        seed: float,
+        pipe: Connection
+    ):
+    # check for cuda
+    cuda_avail = torch.cuda.is_available()
+    if cuda_avail:
+        print('cuda is available.')
+        device = torch.device('cuda')
+    else:
+        print('cuda is not available.')
+        device = torch.device('cpu')
+    print(f'device: "{device}"')
+
+    # load model
+    print(f'Loading networks from "{network}"...')
+    with dnnlib.util.open_url(network) as f:
+        G = legacy.load_network_pkl(f)['G_ema'].to(device)  # type: ignore
+
+    # generate label
+    label = torch.zeros([1, G.c_dim], device=device)
+
+    speed = 0.2  # added to the seed every second
+
+    last_time = time.time()
+    seed_lower = None
+    while True:
+        # get time past since last iteration
+        interval = time.time() - last_time
+        last_time = time.time()
+        seed += interval * speed
+
+        # generate latent vectors
+        if seed_lower != math.floor(seed):
+            seed_lower = int(math.floor(seed))
+            z_lower = torch.from_numpy(
+                np.random.RandomState(seed_lower).randn(1, G.z_dim)
+                ).to(device)
+
+            seed_upper = int(math.ceil(seed))
+            if seed_upper == seed_lower: seed_upper = seed_lower + 1
+            z_upper = torch.from_numpy(
+                np.random.RandomState(seed_upper).randn(1, G.z_dim)
+                ).to(device)
+
+        t = seed - seed_lower
+        z = z_lower * (1 - t) + z_upper * t
+
+        # generate image
+        img: torch.Tensor = G(z, label, truncation_psi=1, noise_mode='const')
+        img = (img.permute(0, 2, 3, 1) * 127.5
+               + 128).clamp(0, 255).to(torch.uint8)
+
+        pil_image = image.fromarray(img[0].cpu().numpy(), 'RGB')
+        if pil_image.size != window_dimensions:
+            pil_image = pil_image.resize(window_dimensions)
+
+        pipe.send_bytes(pil_image.tobytes())
+
+
+def pilImageToSurface(pil_image: Image) -> pygame.Surface:
     return pygame.image.fromstring(
         pil_image.tobytes(), pil_image.size, pil_image.mode
         ).convert()
 
 
-pygame.init()
-window = pygame.display.set_mode((1024, 1024))
-clock = pygame.time.Clock()
+# yapf: disable
+@click.command()
+@click.option('--network',            help='model network pickle filename', type=click.Path(exists=True, file_okay=True, dir_okay=False), required=True)
+@click.option('--window_dimensions',  help='width & height of the window, comma seperated', type=parse_dimensions, required=True)
+@click.option('--speed',              help='base speed', type=float, required=True)
+@click.option('--fps',                help='how many frames/sec to render', type=int, default=60, show_default=True)
+@click.option('--seed',               help='starting seed', type=float, default=0.0, show_default=True)
+# yapf: enable
+def stream(
+        network: str,
+        window_dimensions: Tuple[int, int],
+        speed: float,
+        fps: int,
+        seed: float
+    ) -> None:
 
-pil_images = [Image.open(path) for path in glob.glob('out/*.png')]
+    # setup pygame
+    pygame.init()
+    window = pygame.display.set_mode(window_dimensions)
+    clock = pygame.time.Clock()
 
-run = True
-last_time = time.time()
-index = 0
-current_surface = pilImageToSurface(pil_images[index])
-interval = 1.0
-while run:
-    clock.tick(60)
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            run = False
+    # setup pipe
+    parent_conn, child_conn = mp.Pipe()
 
-    current_time = time.time()
-    if current_time > last_time + interval:
-        index += 1
-        if index >= len(pil_images): index = 0
-        current_surface = pilImageToSurface(pil_images[index])
-        last_time = current_time
-        print(index)
+    # start process
+    process = mp.Process(
+        target=generate_frames,
+        kwargs=({
+            'network': network,
+            'window_dimensions': window_dimensions,
+            'speed': speed,
+            'seed': seed,
+            'pipe': child_conn
+            })
+        )
 
-    # window.fill(0)
-    window.blit(current_surface, current_surface.get_rect(center=(512, 512)))
-    pygame.display.flip()
+    process.start()
+
+    current_surface: pygame.Surface = None
+    try:
+        while True:
+            # limit fps
+            clock.tick(fps)
+
+            # quite the loop when closed
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    raise SystemExit
+
+            # get new surface if avaliable
+            if parent_conn.poll():
+                current_surface = pygame.image.fromstring(
+                    parent_conn.recv_bytes(), window_dimensions, 'RGB'
+                    ).convert()
+
+            # draw current surface if avaliable
+            if current_surface:
+                window.blit(
+                    current_surface,
+                    current_surface.get_rect(
+                        center=tuple(el / 2 for el in window_dimensions)
+                        )
+                    )
+            else:
+                window.fill(0)
+
+            # update window
+            pygame.display.flip()
+    except:
+        if process: process.terminate()
+        if process: process.join()
+        if parent_conn: parent_conn.close()
+        if child_conn: child_conn.close()
+
+
+if __name__ == '__main__':
+    mp.set_start_method('spawn')
+    stream()

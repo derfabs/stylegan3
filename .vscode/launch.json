@@ -13,6 +13,18 @@
             "justMyCode": true
         },
         {
+            "name": "stream",
+            "type": "python",
+            "request": "launch",
+            "program": "stream.py",
+            "args": [
+                "--network=models/stylegan3-t-ffhq-1024x1024.pkl",
+                "--window_dimensions=1024,1024",
+                "--speed=0.1"
+            ],
+            "console": "integratedTerminal"
+        },
+        {
             "name": "generate images",
             "type": "python",
             "request": "launch",
