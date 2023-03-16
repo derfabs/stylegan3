@@ -20,7 +20,9 @@
             "args": [
                 "--network=models/stylegan3-t-ffhq-1024x1024.pkl",
                 "--window_dimensions=2560,1440",
-                "--speed=0.1"
+                "--serial_port=/dev/ttyUSB0",
+                "--baudrate=9600",
+                "--speed=0.1",
             ],
             "console": "integratedTerminal"
         },

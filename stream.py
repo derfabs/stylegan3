@@ -1,6 +1,7 @@
-from typing import Tuple
+from typing import Tuple, Union
 
 import math
+import serial
 import click
 import multiprocessing as mp
 from multiprocessing.connection import Connection
@@ -18,7 +19,13 @@ def parse_dimensions(input: str) -> Tuple[str]:
     return tuple(int(dim.strip()) for dim in input.split(','))
 
 
-def generate_frames(network: str, speed: float, seed: float, pipe: Connection):
+def generate_frames(
+        network: str,
+        speed: float,
+        seed: float,
+        image_connection: Connection,
+        serial_connection: Connection
+    ) -> None:
     # check for cuda
     cuda_avail = torch.cuda.is_available()
     if cuda_avail:
@@ -41,11 +48,16 @@ def generate_frames(network: str, speed: float, seed: float, pipe: Connection):
 
     last_time = time.time()
     seed_lower = None
+    serial_input = 0
     while True:
         # get time past since last iteration
         interval = time.time() - last_time
         last_time = time.time()
         seed += interval * speed
+
+        if serial_connection.poll():
+            serial_input: int = serial_connection.recv()
+            print(serial_input)  # TODO: do something with serial output
 
         # generate latent vectors
         if seed_lower != math.floor(seed):
@@ -70,7 +82,45 @@ def generate_frames(network: str, speed: float, seed: float, pipe: Connection):
 
         pil_image = image.fromarray(img[0].cpu().numpy(), 'RGB')
 
-        pipe.send(pil_image)
+        image_connection.send(pil_image)
+
+
+def read_serial(
+        serial_port: str, baudrate: int, serial_connection: Connection
+    ) -> None:
+    # setup serial
+    ser = serial.Serial(serial_port, baudrate=baudrate, timeout=0.1)
+
+    while True:
+        line = ser.readline()
+        if line:
+            try:
+                current = clamp(int(line.strip()), 0, 1023)
+            except Exception:
+                current = 0
+
+        serial_connection.send(current)
+
+        # reset the serial buffer
+        ser.reset_input_buffer()
+
+
+def clamp(
+        x: Union[float, int], min: Union[float, int], max: Union[float, int]
+    ) -> float:
+    if x < min: return min
+    if x > max: return max
+    return x
+
+
+def map_range(
+        x: Union[float, int],
+        in_min: Union[float, int],
+        in_max: Union[float, int],
+        out_min: Union[float, int],
+        out_max: Union[float, int]
+    ) -> float:
+    return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min
 
 
 def pilImageToSurface(pil_image: Image) -> pygame.Surface:
@@ -84,6 +134,8 @@ def pilImageToSurface(pil_image: Image) -> pygame.Surface:
 @click.option('--network',            help='model network pickle filename', type=click.Path(exists=True, file_okay=True, dir_okay=False), required=True)
 @click.option('--window_dimensions',  help='width & height of the window, comma seperated', type=parse_dimensions, required=True)
 @click.option('--speed',              help='base speed', type=float, required=True)
+@click.option('--serial_port',        help='serial port path', type=str, required=True)
+@click.option('--baudrate',           help='baudrate of the serial connection', type=int, required=True)
 @click.option('--fps',                help='how many frames/sec to render', type=int, default=60, show_default=True)
 @click.option('--seed',               help='starting seed', type=float, default=0.0, show_default=True)
 # yapf: enable
@@ -91,6 +143,8 @@ def stream(
         network: str,
         window_dimensions: Tuple[int, int],
         speed: float,
+        serial_port: str,
+        baudrate: str,
         fps: int,
         seed: float
     ) -> None:
@@ -100,22 +154,33 @@ def stream(
     window = pygame.display.set_mode(window_dimensions)
     clock = pygame.time.Clock()
 
-    # setup pipe
-    parent_conn, child_conn = mp.Pipe()
+    # setup pipes
+    image_conn_parent, image_conn_child = mp.Pipe()
+    serial_conn_parent, serial_conn_child = mp.Pipe()
 
     image_dimensions = (min(window_dimensions), min(window_dimensions))
-    # start process
-    process = mp.Process(
+    # start processes
+    generate_process = mp.Process(
         target=generate_frames,
         kwargs=({
             'network': network,
             'speed': speed,
             'seed': seed,
-            'pipe': child_conn
+            'image_connection': image_conn_child,
+            'serial_connection': serial_conn_parent
+            })
+        )
+    serial_process = mp.Process(
+        target=read_serial,
+        kwargs=({
+            'serial_port': serial_port,
+            'baudrate': baudrate,
+            'serial_connection': serial_conn_child
             })
         )
 
-    process.start()
+    generate_process.start()
+    serial_process.start()
 
     current_surface: pygame.Surface = None
     try:
@@ -132,8 +197,8 @@ def stream(
                         pygame.display.toggle_fullscreen()
 
             # get new surface if avaliable
-            if parent_conn.poll():
-                pil_image: Image = parent_conn.recv()
+            if image_conn_parent.poll():
+                pil_image: Image = image_conn_parent.recv()
 
                 if pil_image.size != image_dimensions:
                     pil_image = pil_image.resize(image_dimensions)
@@ -155,10 +220,16 @@ def stream(
             # update window
             pygame.display.flip()
     except:
-        if process: process.terminate()
-        if process: process.join()
-        if parent_conn: parent_conn.close()
-        if child_conn: child_conn.close()
+        if generate_process:
+            generate_process.terminate()
+            generate_process.join()
+        if serial_process:
+            serial_process.terminate()
+            serial_process.join()
+        if image_conn_parent: image_conn_parent.close()
+        if image_conn_child: image_conn_child.close()
+        if serial_conn_parent: serial_conn_parent.close()
+        if serial_conn_child: serial_conn_child.close()
 
 
 if __name__ == '__main__':
