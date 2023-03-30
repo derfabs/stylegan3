@@ -19,10 +19,11 @@
             "program": "stream.py",
             "args": [
                 "--network=models/stylegan3-t-ffhq-1024x1024.pkl",
-                "--window_dimensions=2560,1440",
-                "--serial_port=/dev/ttyUSB0",
+                "--window_dimensions=1024,1024",
+                "--serial_port=/dev/ttyACM0",
                 "--baudrate=9600",
-                "--speed=0.1",
+                "--min_speed=0.0",
+                "--max_speed=0.3"
             ],
             "console": "integratedTerminal"
         },

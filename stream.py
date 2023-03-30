@@ -21,7 +21,8 @@ def parse_dimensions(input: str) -> Tuple[str]:
 
 def generate_frames(
         network: str,
-        speed: float,
+        min_speed: float,
+        max_speed: float,
         seed: float,
         image_connection: Connection,
         serial_connection: Connection
@@ -44,15 +45,19 @@ def generate_frames(
     # generate label
     label = torch.zeros([1, G.c_dim], device=device)
 
-    speed = 0.2  # added to the seed every second
-
     last_time = time.time()
     seed_lower = None
     serial_input = 0
+    speed = min_speed
     while True:
         # get time past since last iteration
         interval = time.time() - last_time
         last_time = time.time()
+
+        if serial_connection.poll():
+            current = float(serial_connection.recv())
+            speed = min_speed + current * (max_speed - min_speed)
+            # print(current, '\t', speed)
         seed += interval * speed
 
         if serial_connection.poll():
@@ -95,7 +100,9 @@ def read_serial(
         line = ser.readline()
         if line:
             try:
-                current = clamp(int(line.strip()), 0, 1023)
+                current = map_range(
+                    clamp(int(line.strip()), 0, 1023), 0.0, 1023.0, 0.0, 1.0
+                    )
             except Exception:
                 current = 0
 
@@ -133,7 +140,8 @@ def pilImageToSurface(pil_image: Image) -> pygame.Surface:
 @click.command()
 @click.option('--network',            help='model network pickle filename', type=click.Path(exists=True, file_okay=True, dir_okay=False), required=True)
 @click.option('--window_dimensions',  help='width & height of the window, comma seperated', type=parse_dimensions, required=True)
-@click.option('--speed',              help='base speed', type=float, required=True)
+@click.option('--min_speed',          help='minimum speed (when the arduino sends 0)', type=float, required=True)
+@click.option('--max_speed',          help='maximum speed (when the arduino sends 1023)', type=float, required=True)
 @click.option('--serial_port',        help='serial port path', type=str, required=True)
 @click.option('--baudrate',           help='baudrate of the serial connection', type=int, required=True)
 @click.option('--fps',                help='how many frames/sec to render', type=int, default=60, show_default=True)
@@ -142,7 +150,8 @@ def pilImageToSurface(pil_image: Image) -> pygame.Surface:
 def stream(
         network: str,
         window_dimensions: Tuple[int, int],
-        speed: float,
+        min_speed: float,
+        max_speed: float,
         serial_port: str,
         baudrate: str,
         fps: int,
@@ -164,7 +173,8 @@ def stream(
         target=generate_frames,
         kwargs=({
             'network': network,
-            'speed': speed,
+            'min_speed': min_speed,
+            'max_speed': max_speed,
             'seed': seed,
             'image_connection': image_conn_child,
             'serial_connection': serial_conn_parent
